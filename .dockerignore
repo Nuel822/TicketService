@@ -1,0 +1,21 @@
+# Exclude build artifacts that contain Windows-specific paths
+**/obj/
+**/bin/
+
+# Exclude test projects
+tests/
+
+# Exclude git and IDE files
+.git/
+.gitignore
+.vs/
+*.user
+*.suo
+
+# Exclude Docker files themselves
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Exclude docs
+README.md

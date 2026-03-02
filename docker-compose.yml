@@ -1,0 +1,75 @@
+services:
+
+  # ── Single PostgreSQL instance hosting both databases ─────────────────────
+  # The init.sql script (mounted via docker-entrypoint-initdb.d) creates the
+  # ticketing_reporting database alongside the primary ticketing database.
+  postgres:
+    image: postgres:16-alpine
+    container_name: ticketing-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ticketing
+      POSTGRES_USER: ticketing_user
+      POSTGRES_PASSWORD: ticketing_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ticketing_user -d ticketing"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+
+  # ── EF Core migrations (runs once, then exits) ────────────────────────────
+  # Applies pending migrations to both databases before the API starts.
+  # nuget-cache volume persists the NuGet package cache and dotnet-ef tool
+  # across restarts so packages are never re-downloaded.
+  db-migrate:
+    image: mcr.microsoft.com/dotnet/sdk:10.0
+    container_name: db-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - .:/workspace
+      - nuget-cache:/root/.nuget/packages
+      - dotnet-tools:/root/.dotnet/tools
+    working_dir: /workspace
+    environment:
+      TICKETING_DB_CONN: "Host=postgres;Port=5432;Database=ticketing;Username=ticketing_user;Password=ticketing_pass"
+      REPORTING_DB_CONN: "Host=postgres;Port=5432;Database=ticketing_reporting;Username=ticketing_user;Password=ticketing_pass"
+    command: |
+      bash -c "
+        export PATH=\"$$PATH:/root/.dotnet/tools\" &&
+        dotnet tool list --global | grep -q dotnet-ef || dotnet tool install --global dotnet-ef --version 10.0.0 &&
+        find /workspace/src -type d -name obj -print0 | xargs -0 --no-run-if-empty rm -rf &&
+        dotnet restore src/TicketService.API/TicketService.API.csproj &&
+        dotnet ef database update --project src/TicketService.Infrastructure --startup-project src/TicketService.API --context TicketingDbContext --connection \"$$TICKETING_DB_CONN\" &&
+        dotnet ef database update --project src/TicketService.Infrastructure --startup-project src/TicketService.API --context ReportingDbContext --connection \"$$REPORTING_DB_CONN\"
+      "
+
+  # ── Ticket Service API ────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ticket-service-api
+    restart: unless-stopped
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__TicketingDb: "Host=postgres;Port=5432;Database=ticketing;Username=ticketing_user;Password=ticketing_pass;Include Error Detail=true"
+      ConnectionStrings__ReportingDb: "Host=postgres;Port=5432;Database=ticketing_reporting;Username=ticketing_user;Password=ticketing_pass;Include Error Detail=true"
+
+volumes:
+  postgres-data:
+  nuget-cache:
+  dotnet-tools:
